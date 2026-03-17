@@ -1,0 +1,132 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import os
+import sys
+import base64
+import zlib
+import hashlib
+from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+
+
+BANNER = """
+============================================================
+PHP OBFUSCATOR - ZLIB SAFE MODE
+============================================================
+"""
+
+WRAPPER = """<?php
+$h="{hash}";
+$d=base64_decode("{data}");
+if(hash("sha256",$d)!==$h){{die("Integrity Error");}}
+eval(gzuncompress($d));
+?>"""
+
+
+def comprimir_codigo(data: bytes):
+    comprimido = zlib.compress(data, 9)
+    b64 = base64.b64encode(comprimido).decode("ascii")
+    sha = hashlib.sha256(comprimido).hexdigest()
+    return b64, sha
+
+
+def procesar_archivo(origen: Path, destino: Path):
+    try:
+        with open(origen, "rb") as f:
+            codigo = f.read()
+
+        if codigo.startswith(b"<?php"):
+            codigo = codigo[5:]
+
+        b64, sha = comprimir_codigo(codigo)
+
+        destino.parent.mkdir(parents=True, exist_ok=True)
+
+        contenido = WRAPPER.format(hash=sha, data=b64)
+
+        with open(destino, "w", encoding="utf-8") as f:
+            f.write(contenido)
+
+        return (True, str(origen))
+
+    except Exception as e:
+        return (False, f"{origen} -> {e}")
+
+
+def recolectar_php(origen):
+    archivos = []
+    for root, _, files in os.walk(origen):
+        for file in files:
+            if file.lower().endswith(".php"):
+                archivos.append(Path(root) / file)
+    return archivos
+
+
+def ofuscar(origen, destino, workers):
+
+    origen = Path(origen)
+    destino = Path(destino)
+
+    if not origen.exists():
+        print("ERROR: Source directory does not exist")
+        return
+
+    archivos = recolectar_php(origen)
+    total = len(archivos)
+
+    print(BANNER)
+    print("Source   :", origen)
+    print("Output   :", destino)
+    print("Files    :", total)
+    print("Workers  :", workers)
+    print("------------------------------------------------------------")
+
+    tareas = []
+    for archivo in archivos:
+        rel = archivo.relative_to(origen)
+        salida = destino / rel
+        tareas.append((archivo, salida))
+
+    ok = 0
+    errores = []
+
+    with ThreadPoolExecutor(max_workers=workers) as exe:
+        resultados = exe.map(lambda x: procesar_archivo(*x), tareas)
+
+        for r in resultados:
+            if r[0]:
+                ok += 1
+            else:
+                errores.append(r[1])
+
+    print("------------------------------------------------------------")
+    print("Processed :", ok, "/", total)
+    print("Errors    :", len(errores))
+
+    if errores:
+        print("\nError details:")
+        for e in errores[:20]:
+            print(" -", e)
+
+    print("\nOutput directory:", destino)
+    print("============================================================")
+
+
+if __name__ == "__main__":
+
+    if len(sys.argv) < 3:
+        print("""
+Usage:
+python3 ofuscar_php.py <source_dir> <output_dir> [workers]
+
+Example:
+python3 ofuscar_php.py /var/www/app /var/www/app_obfuscated 8
+""")
+        sys.exit(1)
+
+    origen = sys.argv[1]
+    destino = sys.argv[2]
+    workers = int(sys.argv[3]) if len(sys.argv) > 3 else os.cpu_count()
+
+    ofuscar(origen, destino, workers)
